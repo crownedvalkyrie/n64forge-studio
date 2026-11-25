@@ -1,0 +1,85 @@
+name: Build macOS & Windows Releases
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: brew install cmake ninja qt sdl3
+      - name: Configure & Build Release
+        run: |
+          cmake -B build-mac -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix qt);$(brew --prefix sdl3)"
+          cmake --build build-mac -j4
+      - name: Package macOS App
+        run: |
+          mkdir -p dist-mac
+          cp -R build-mac/n64forge_studio.app dist-mac/ 2>/dev/null || cp -R build-mac/*/n64forge_studio.app dist-mac/
+          ditto -c -k --sequesterRsrc --keepParent dist-mac/n64forge_studio.app N64ForgeStudio-macOS-arm64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: N64ForgeStudio-macOS-arm64
+          path: N64ForgeStudio-macOS-arm64.zip
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup MSVC x64
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v6
+      - name: Install Qt 6
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.2"
+          host: "windows"
+          target: "desktop"
+          arch: "win64_msvc2022_64"
+          modules: "qtmultimedia"
+      - name: Install SDL3 via vcpkg
+        run: |
+          vcpkg install sdl3:x64-windows vulkan-headers:x64-windows
+      - name: Configure & Build Release
+        run: |
+          cmake -B build-win -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          cmake --build build-win
+      - name: Package Windows Release
+        run: |
+          mkdir dist-win
+          copy build-win\n64forge_studio.exe dist-win\
+          copy build-win\*.dll dist-win\
+          windeployqt --release --no-translations dist-win\n64forge_studio.exe
+          Compress-Archive -Path dist-win\* -DestinationPath N64ForgeStudio-Windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: N64ForgeStudio-Windows-x64
+          path: N64ForgeStudio-Windows-x64.zip
+
+  publish-release:
+    needs: [build-macos, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.zip

@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/splash">
+        <file>n64musplashlogo.gif</file>
+    </qresource>
+</RCC>

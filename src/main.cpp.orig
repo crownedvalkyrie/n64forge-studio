@@ -1,0 +1,45 @@
+#include "n64forge/core/emulator.hpp"
+#include "n64forge/video/renderer.hpp"
+#include <cstring>
+#include <iostream>
+#include <stdexcept>
+
+int main(int argc, char* argv[]) {
+    n64forge::Emulator emulator;
+    auto renderer = n64forge::createRenderer();
+
+    if (argc > 1) {
+        const char* romPath = argv[1];
+        std::cout << "Loading ROM: " << romPath << '\n';
+        if (!emulator.loadCartridge(romPath)) {
+            std::cerr << "Failed to load ROM.\n";
+            return 1;
+        }
+        const auto& header = emulator.cartridge().header();
+        std::cout << "ROM loaded: " << header.name << '\n';
+        std::cout << "Size: " << emulator.cartridge().size() << " bytes\n";
+        std::cout << "Format: " << emulator.cartridge().formatName() << '\n';
+        std::cout << "Boot PC: 0x" << std::hex << header.bootPc << std::dec << '\n';
+
+        constexpr int Steps = 100;
+        std::cout << "Running " << Steps << " CPU steps (emulation is partial):\n";
+        try {
+            for (int i = 0; i < Steps; ++i) {
+                emulator.runOneStep();
+            }
+            std::cout << "CPU PC after steps: 0x" << std::hex << emulator.cpu().pc() << std::dec << '\n';
+        } catch (const std::exception& e) {
+            std::cerr << "Execution stopped: " << e.what() << '\n';
+            std::cerr << "PC: 0x" << std::hex << emulator.cpu().pc() << std::dec << '\n';
+            return 2;
+        }
+        return 0;
+    }
+
+    std::cout << "N64Forge 0.1.0\n";
+    std::cout << "Usage: " << (argc > 0 ? argv[0] : "n64forge") << " <rom.z64|rom.n64|rom.v64>\n";
+    std::cout << "CPU reset PC: 0x" << std::hex << emulator.cpu().pc() << '\n';
+    std::cout << "Renderer: " << (renderer ? renderer->backendName() : "not available") << '\n';
+    std::cout << "Emulation core is partially implemented; pass a ROM path to exercise it.\n";
+    return 0;
+}

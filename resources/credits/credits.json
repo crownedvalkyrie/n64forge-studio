@@ -1,0 +1,38 @@
+{
+  "devs": [
+    {
+      "name": "Skye",
+      "role": "Solo Developer · High School Student",
+      "note": "Solo dev behind the emulator core, ARM64 JIT, RDP/Metal renderer, static recompiler, Studio UI, and hardware research.",
+      "pfp": "avatars/skye.jpg"
+    },
+    {
+      "name": "Hardware Documentation",
+      "role": "Primary Reference Sources",
+      "note": "N64brew, libdragon, and ares hardware documentation used during development.",
+      "pfp": "avatars/contributor.png"
+    }
+  ],
+  "supporters": [
+    {
+      "name": "Open for Supporters",
+      "role": "Supporter",
+      "note": "Future project supporters and sponsors will be listed here.",
+      "pfp": "avatars/supporters.png"
+    },
+    {
+      "name": "N64 Homebrew Community",
+      "role": "Community",
+      "note": "Open-source test ROMs, tools, and emulation research.",
+      "pfp": "avatars/community.png"
+    }
+  ],
+  "testers": [
+    {
+      "name": "Open for Testers",
+      "role": "Tester",
+      "note": "Future compatibility testers and bug reporters will be listed here.",
+      "pfp": "avatars/tester.png"
+    }
+  ]
+}

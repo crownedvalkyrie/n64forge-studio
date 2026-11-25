@@ -1,0 +1,45 @@
+{
+  "version": 5,
+  "configurePresets": [
+    {
+      "name": "windows-msvc",
+      "displayName": "Windows - Visual Studio 2022 x64",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/windows",
+      "cacheVariables": { "CMAKE_CXX_STANDARD": "20" }
+    },
+    {
+      "name": "macos",
+      "displayName": "macOS - Xcode",
+      "generator": "Xcode",
+      "binaryDir": "${sourceDir}/build/macos",
+      "cacheVariables": { "CMAKE_OSX_DEPLOYMENT_TARGET": "13.0" }
+    },
+    {
+      "name": "macos-hardware",
+      "displayName": "macOS - opt-in hardware corpus",
+      "inherits": "macos",
+      "binaryDir": "${sourceDir}/build/macos-hardware",
+      "cacheVariables": { "N64FORGE_ENABLE_HARDWARE_TESTS": "ON" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "windows-debug", "configurePreset": "windows-msvc", "configuration": "Debug" },
+    { "name": "macos-debug", "configurePreset": "macos", "configuration": "Debug" },
+    { "name": "macos-release", "configurePreset": "macos", "configuration": "Release" },
+    { "name": "macos-hardware-release", "configurePreset": "macos-hardware", "configuration": "Release" }
+  ],
+  "testPresets": [
+    { "name": "windows-tests", "configurePreset": "windows-msvc", "configuration": "Debug", "output": { "outputOnFailure": true } },
+    { "name": "macos-tests", "configurePreset": "macos", "configuration": "Debug", "output": { "outputOnFailure": true } },
+    { "name": "macos-release-tests", "configurePreset": "macos", "configuration": "Release", "output": { "outputOnFailure": true } },
+    {
+      "name": "macos-hardware-tests",
+      "configurePreset": "macos-hardware",
+      "configuration": "Release",
+      "filter": { "include": { "label": "hardware" } },
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": ["AGENTS.md"],
+  "mcp": {
+    "servers": {}
+  },
+  "watcher": {
+    "ignore": ["build/**", "dist/**", ".git/**", "third_party/**"]
+  }
+}

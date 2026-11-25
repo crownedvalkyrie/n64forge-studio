@@ -1,0 +1,82 @@
+--- a/CMakeLists.txt	2026-11-22 22:58:00.986755992 +0000
++++ b/CMakeLists.txt	2026-11-22 22:58:00.987047219 +0000
+@@ -29,6 +29,7 @@
+     src/core/memory.cpp
+     src/core/bus.cpp
+     src/core/cartridge.cpp
++    src/core/r4300_decode.cpp
+     src/core/cpu.cpp
+     src/core/rsp.cpp
+     src/core/controller.cpp
+@@ -83,13 +84,26 @@
+         "-framework Foundation" "-framework Metal" "-framework QuartzCore" "-framework AppKit")
+ endif()
+ 
++# Static recompiler front-end (Track A): analyzer, CFG, jump tables, signatures.
++add_library(n64forge_recomp
++    src/recomp/analyzer.cpp
++    src/recomp/analyze_cli.cpp
++)
++target_include_directories(n64forge_recomp PUBLIC include)
++target_link_libraries(n64forge_recomp PUBLIC n64forge_core)
++if(MSVC)
++    target_compile_options(n64forge_recomp PRIVATE /W4 /permissive- /EHsc)
++else()
++    target_compile_options(n64forge_recomp PRIVATE -Wall -Wextra -Wpedantic)
++endif()
++
+ add_executable(n64forge src/main.cpp)
+-target_link_libraries(n64forge PRIVATE n64forge_core n64forge_video)
++target_link_libraries(n64forge PRIVATE n64forge_core n64forge_video n64forge_recomp)
+ 
+ if(N64FORGE_BUILD_TESTS)
+     enable_testing()
+-    add_executable(n64forge_tests tests/core_tests.cpp)
+-    target_link_libraries(n64forge_tests PRIVATE n64forge_core)
++    add_executable(n64forge_tests tests/core_tests.cpp tests/recomp_tests.cpp)
++    target_link_libraries(n64forge_tests PRIVATE n64forge_core n64forge_recomp)
+     add_test(NAME n64forge_core_tests COMMAND n64forge_tests)
+ 
+     if(SDL3_FOUND)
+--- a/src/main.cpp	2026-11-22 22:58:00.986281512 +0000
++++ b/src/main.cpp	2026-11-22 22:58:00.987201082 +0000
+@@ -1,9 +1,13 @@
+ #include "n64forge/core/emulator.hpp"
++#include "n64forge/recomp/analyzer.hpp"
+ #include "n64forge/video/renderer.hpp"
+ #include <cstring>
+ #include <iostream>
+ #include <stdexcept>
+ int main(int argc, char* argv[]) {
++    if (argc > 1 && std::strcmp(argv[1], "analyze") == 0) {
++        return n64forge::recomp::runAnalyzeCommand(argc - 2, argv + 2);
++    }
+     n64forge::Emulator emulator;
+     auto renderer = n64forge::createRenderer();
+     if (argc > 1) {
+--- a/tests/core_tests.cpp	2026-11-22 22:58:00.986634158 +0000
++++ b/tests/core_tests.cpp	2026-11-22 22:56:15.739269045 +0000
+@@ -8,6 +8,7 @@
+ #include <cstring>
+ #include <string>
+ #include <vector>
++int run_recomp_tests();
+ using namespace n64forge;
+ static constexpr u32 opSpecial = 0x00;
+ static constexpr u32 opRegimm  = 0x01;
+@@ -224,5 +225,5 @@
+     test_cpu_branch_delay_slot();
+     test_cpu_jump_and_link();
+     test_rsp_scalar();
+-    return 0;
++    return run_recomp_tests() == 0 ? 0 : 1;
+ }
+--- a/src/core/cartridge.cpp	2026-11-22 22:58:00.985775505 +0000
++++ b/src/core/cartridge.cpp	2026-11-22 22:48:37.987685495 +0000
+@@ -1,5 +1,6 @@
+ #include "n64forge/core/cartridge.hpp"
+ #include <algorithm>
++#include <array>
+ #include <cstdint>
+ #include <cstring>
+ #include <fstream>

@@ -1,0 +1,300 @@
+#include "n64forge/core/bus.hpp"
+#include "n64forge/core/cartridge.hpp"
+#include "n64forge/core/cpu.hpp"
+#include "n64forge/core/memory.hpp"
+#include "n64forge/core/rsp.hpp"
+#include <array>
+#include <cassert>
+#include <cstring>
+#include <string>
+#include <vector>
+
+using namespace n64forge;
+
+// ---------------------------------------------------------------------------
+// MIPS instruction encoding helpers
+// ---------------------------------------------------------------------------
+
+static constexpr u32 opSpecial = 0x00;
+static constexpr u32 opRegimm  = 0x01;
+static constexpr u32 opJ       = 0x02;
+static constexpr u32 opJal     = 0x03;
+static constexpr u32 opBeq     = 0x04;
+static constexpr u32 opBne     = 0x05;
+static constexpr u32 opBlez    = 0x06;
+static constexpr u32 opBgtz    = 0x07;
+static constexpr u32 opAddi    = 0x08;
+static constexpr u32 opAddiu   = 0x09;
+static constexpr u32 opSlti    = 0x0A;
+static constexpr u32 opSltiu   = 0x0B;
+static constexpr u32 opAndi    = 0x0C;
+static constexpr u32 opOri     = 0x0D;
+static constexpr u32 opXori    = 0x0E;
+static constexpr u32 opLui     = 0x0F;
+static constexpr u32 opCop0    = 0x10;
+static constexpr u32 opLb      = 0x20;
+static constexpr u32 opLh      = 0x21;
+static constexpr u32 opLw      = 0x23;
+static constexpr u32 opLbu     = 0x24;
+static constexpr u32 opLhu     = 0x25;
+static constexpr u32 opSb      = 0x28;
+static constexpr u32 opSh      = 0x29;
+static constexpr u32 opSw      = 0x2B;
+
+[[nodiscard]] u32 encodeR(u32 funct, u32 rs, u32 rt, u32 rd, u32 shamt = 0) {
+    return opSpecial | (rs << 21) | (rt << 16) | (rd << 11) | (shamt << 6) | funct;
+}
+[[nodiscard]] u32 encodeI(u32 opcode, u32 rs, u32 rt, s16 imm) {
+    return (opcode << 26) | (rs << 21) | (rt << 16) | (static_cast<u16>(imm));
+}
+[[nodiscard]] u32 encodeJ(u32 opcode, u32 target) {
+    return (opcode << 26) | (target & 0x03FFFFFF);
+}
+
+[[nodiscard]] u32 addiu(u32 rt, u32 rs, s16 imm) { return encodeI(opAddiu, rs, rt, imm); }
+[[nodiscard]] u32 ori(u32 rt, u32 rs, u16 imm)   { return encodeI(opOri, rs, rt, static_cast<s16>(imm)); }
+[[nodiscard]] u32 lui(u32 rt, u16 imm)           { return encodeI(opLui, 0, rt, static_cast<s16>(imm)); }
+[[nodiscard]] u32 sw(u32 rt, u32 rs, s16 imm)    { return encodeI(opSw, rs, rt, imm); }
+[[nodiscard]] u32 lw(u32 rt, u32 rs, s16 imm)    { return encodeI(opLw, rs, rt, imm); }
+[[nodiscard]] u32 lbu(u32 rt, u32 rs, s16 imm)   { return encodeI(opLbu, rs, rt, imm); }
+[[nodiscard]] u32 lb(u32 rt, u32 rs, s16 imm)    { return encodeI(opLb, rs, rt, imm); }
+[[nodiscard]] u32 beq(u32 rs, u32 rt, s16 off)   { return encodeI(opBeq, rs, rt, off); }
+[[nodiscard]] u32 bne(u32 rs, u32 rt, s16 off)   { return encodeI(opBne, rs, rt, off); }
+[[nodiscard]] u32 j(u32 target)                  { return encodeJ(opJ, target); }
+[[nodiscard]] u32 addu(u32 rd, u32 rs, u32 rt)   { return encodeR(0x21, rs, rt, rd); }
+[[nodiscard]] u32 subu(u32 rd, u32 rs, u32 rt)   { return encodeR(0x23, rs, rt, rd); }
+[[nodiscard]] u32 and_(u32 rd, u32 rs, u32 rt)   { return encodeR(0x24, rs, rt, rd); }
+[[nodiscard]] u32 or_(u32 rd, u32 rs, u32 rt)    { return encodeR(0x25, rs, rt, rd); }
+[[nodiscard]] u32 xor_(u32 rd, u32 rs, u32 rt)   { return encodeR(0x26, rs, rt, rd); }
+[[nodiscard]] u32 nor_(u32 rd, u32 rs, u32 rt)   { return encodeR(0x27, rs, rt, rd); }
+[[nodiscard]] u32 slt(u32 rd, u32 rs, u32 rt)    { return encodeR(0x2A, rs, rt, rd); }
+[[nodiscard]] u32 sltu(u32 rd, u32 rs, u32 rt)   { return encodeR(0x2B, rs, rt, rd); }
+[[nodiscard]] u32 sll(u32 rd, u32 rt, u32 sh)    { return encodeR(0x00, 0, rt, rd, sh); }
+[[nodiscard]] u32 srl(u32 rd, u32 rt, u32 sh)    { return encodeR(0x02, 0, rt, rd, sh); }
+
+// ---------------------------------------------------------------------------
+// Helpers to write a program into RDRAM and run it
+// ---------------------------------------------------------------------------
+
+void writeProgram(Bus& bus, u32 physAddr, const std::vector<u32>& instructions) {
+    for (size_t i = 0; i < instructions.size(); ++i) {
+        bus.write32(static_cast<u32>(physAddr + i * 4), instructions[i]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+void test_memory() {
+    Memory memory;
+    memory.write32(0x100, 0x12345678);
+    assert(memory.read32(0x100) == 0x12345678);
+    memory.write16(0x200, 0xABCD);
+    assert(memory.read16(0x200) == 0xABCD);
+    memory.write8(0x300, 0x42);
+    assert(memory.read8(0x300) == 0x42);
+}
+
+void test_cartridge_conversion() {
+    constexpr size_t RomSize = 1024 * 1024;
+    std::vector<u8> z64(RomSize, 0);
+    // Standard big-endian header
+    z64[0] = 0x80; z64[1] = 0x37; z64[2] = 0x12; z64[3] = 0x40;
+    z64[0x20] = 'T'; z64[0x21] = 'E'; z64[0x22] = 'S'; z64[0x23] = 'T';
+
+    // .v64 = byte-swapped pairs
+    std::vector<u8> v64 = z64;
+    for (size_t i = 0; i + 1 < v64.size(); i += 2) {
+        std::swap(v64[i], v64[i + 1]);
+    }
+
+    // .n64 = little-endian word-swapped
+    std::vector<u8> n64 = z64;
+    for (size_t i = 0; i + 3 < n64.size(); i += 4) {
+        std::swap(n64[i], n64[i + 3]);
+        std::swap(n64[i + 1], n64[i + 2]);
+    }
+
+    Cartridge cartZ, cartV, cartN;
+    assert(cartZ.loadFromBuffer(z64, RomFormat::Z64));
+    assert(cartV.loadFromBuffer(v64, RomFormat::V64));
+    assert(cartN.loadFromBuffer(n64, RomFormat::N64));
+
+    assert(cartZ.format() == RomFormat::Z64);
+    assert(cartV.format() == RomFormat::V64);
+    assert(cartN.format() == RomFormat::N64);
+
+    assert(cartZ.rom()[0] == 0x80 && cartZ.rom()[1] == 0x37);
+    assert(cartV.rom()[0] == 0x80 && cartV.rom()[1] == 0x37);
+    assert(cartN.rom()[0] == 0x80 && cartN.rom()[1] == 0x37);
+    assert(cartZ.header().name == "TEST");
+    assert(cartV.header().name == "TEST");
+    assert(cartN.header().name == "TEST");
+}
+
+void test_bus_mapping() {
+    Bus bus;
+    Rsp rsp;
+    bus.attachRsp(&rsp);
+    rsp.setBus(&bus);
+
+    bus.write32(0x100, 0xAABBCCDD);
+    assert(bus.read32(0x100) == 0xAABBCCDD);
+
+    // SP DMEM and IMEM
+    bus.write32(0x04000000, 0x11111111);
+    assert(bus.read32(0x04000000) == 0x11111111);
+    bus.write32(0x04001000, 0x22222222);
+    assert(bus.read32(0x04001000) == 0x22222222);
+
+    // PIF RAM
+    bus.write32(0x1FC00000, 0x33333333);
+    assert(bus.read32(0x1FC00000) == 0x33333333);
+}
+
+void test_cpu_alu() {
+    Bus bus;
+    Cpu cpu;
+    cpu.setPc(0x100);
+
+    // r1 = 10; r2 = 20; r3 = r1 + r2; r4 = r2 - r1; r5 = r1 | r2
+    writeProgram(bus, 0x100, {
+        addiu(1, 0, 10),
+        addiu(2, 0, 20),
+        addu(3, 1, 2),
+        subu(4, 2, 1),
+        ori(5, 1, 0xF0),
+        and_(6, 1, 2),
+    });
+
+    for (int i = 0; i < 6; ++i) cpu.step(bus);
+
+    assert(cpu.gpr()[1] == 10);
+    assert(cpu.gpr()[2] == 20);
+    assert(cpu.gpr()[3] == 30);
+    assert(cpu.gpr()[4] == 10);
+    assert(cpu.gpr()[5] == (10 | 0xF0));
+    assert(cpu.gpr()[6] == (10 & 20));
+}
+
+void test_cpu_load_store() {
+    Bus bus;
+    Cpu cpu;
+    cpu.setPc(0x200);
+
+    // Store 0x12345678 at 0x400, load back into r2, then load byte
+    writeProgram(bus, 0x200, {
+        lui(1, 0x1234),
+        ori(1, 1, 0x5678),
+        sw(1, 0, 0x400),
+        lw(2, 0, 0x400),
+        lbu(3, 0, 0x400),
+        lb(4, 0, 0x400),
+    });
+
+    for (int i = 0; i < 6; ++i) cpu.step(bus);
+
+    assert(cpu.gpr()[1] == 0x12345678);
+    assert(cpu.gpr()[2] == 0x12345678);
+    assert(cpu.gpr()[3] == 0x12); // big-endian: MSB at base address
+    assert(cpu.gpr()[4] == 0x12);
+}
+
+void test_cpu_branch_delay_slot() {
+    Bus bus;
+    Cpu cpu;
+    cpu.setPc(0x300);
+
+    // r1 = 5
+    // loop:
+    //   addiu r1, r1, -1
+    //   bne r1, r0, loop
+    //   nop
+    // sw r1, 0(r0)
+    writeProgram(bus, 0x300, {
+        addiu(1, 0, 5),
+        addiu(1, 1, -1),          // loop target
+        bne(1, 0, -2),            // branch back to addiu
+        0x00000000,               // nop delay slot
+        sw(1, 0, 0x500),
+    });
+
+    // 1 (addiu init) + 5 iterations * 3 instructions (addiu, bne, nop)
+    for (int i = 0; i < 1 + 5 * 3; ++i) cpu.step(bus);
+    assert(cpu.gpr()[1] == 0);
+
+    // Execute the store
+    cpu.step(bus);
+    assert(bus.read32(0x500) == 0);
+}
+
+void test_cpu_jump_and_link() {
+    Bus bus;
+    Cpu cpu;
+    cpu.setPc(0x400);
+
+    // jal target
+    // nop
+    // ... target: addiu r1, r0, 7
+    // jr r31
+    // nop
+    const u32 target = (0x500 >> 2);
+    writeProgram(bus, 0x400, {
+        encodeJ(opJal, target),
+        0x00000000,
+        addiu(1, 0, 99),
+        0x00000000,
+    });
+    writeProgram(bus, 0x500, {
+        addiu(1, 0, 7),
+        encodeR(0x08, 31, 0, 0), // jr r31
+        0x00000000,
+    });
+
+    cpu.step(bus); // jal
+    cpu.step(bus); // delay nop
+    cpu.step(bus); // addiu at target
+    cpu.step(bus); // jr r31
+    cpu.step(bus); // delay nop
+    cpu.step(bus); // instruction after jal (addiu r1, 0, 99)
+
+    assert(cpu.gpr()[1] == 99);
+    assert(cpu.gpr()[31] == 0x408);
+}
+
+void test_rsp_scalar() {
+    Bus bus;
+    Rsp rsp;
+    bus.attachRsp(&rsp);
+    rsp.setBus(&bus);
+    rsp.setPc(0);
+
+    // Write program into RSP IMEM via the CPU-visible bus address.
+    writeProgram(bus, 0x04001000, {
+        addiu(1, 0, 7),
+        addiu(2, 0, 3),
+        addu(3, 1, 2),
+        sw(3, 0, 0),
+        0x00000000,
+    });
+
+    for (int i = 0; i < 5; ++i) rsp.step();
+
+    assert(rsp.regs()[3] == 10);
+    assert(bus.read32(0x04000000) == 10);
+}
+
+// ---------------------------------------------------------------------------
+
+int main() {
+    test_memory();
+    test_cartridge_conversion();
+    test_bus_mapping();
+    test_cpu_alu();
+    test_cpu_load_store();
+    test_cpu_branch_delay_slot();
+    test_cpu_jump_and_link();
+    test_rsp_scalar();
+    return 0;
+}

@@ -1,0 +1,101 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.2'
+          cache: true
+
+      - name: Configure
+        run: cmake --preset macos
+
+      - name: Build
+        run: cmake --build --preset macos-debug
+
+      - name: Test
+        run: ctest --preset macos-tests
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.2'
+          cache: true
+
+      # Build-time headers only. No Vulkan loader, ICD, SDK installer or
+      # proprietary file is vendored or installed into the application.
+      - name: Fetch pinned Vulkan headers
+        shell: pwsh
+        run: |
+          $headers = Join-Path $env:RUNNER_TEMP 'Vulkan-Headers'
+          git clone --depth 1 --branch v1.3.280 https://github.com/KhronosGroup/Vulkan-Headers.git $headers
+          if (-not (Test-Path (Join-Path $headers 'include/vulkan/vulkan.h'))) {
+            throw 'Vulkan-Headers did not provide vulkan/vulkan.h'
+          }
+          if (-not (Test-Path (Join-Path $headers 'include/vulkan/vulkan_win32.h'))) {
+            throw 'Vulkan-Headers did not provide vulkan/vulkan_win32.h'
+          }
+          "N64FORGE_WIN32_VULKAN_INCLUDE_DIR=$headers/include" >> $env:GITHUB_ENV
+
+      - name: Configure x64 with native backends
+        shell: pwsh
+        run: |
+          cmake --preset windows-msvc `
+            -DN64FORGE_ENABLE_D3D12=ON `
+            -DN64FORGE_ENABLE_WIN32_VULKAN=ON `
+            -DN64FORGE_WIN32_VULKAN_INCLUDE_DIR:PATH="$env:N64FORGE_WIN32_VULKAN_INCLUDE_DIR" `
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Verify D3D12, Vulkan and x64 JIT sources are configured
+        shell: pwsh
+        run: |
+          $cache = Get-Content build/windows/CMakeCache.txt
+          function Get-CacheValue([string]$name) {
+            foreach ($line in $cache) {
+              if ($line -match "^$([regex]::Escape($name)):[^=]+=(.*)$") { return $Matches[1] }
+            }
+            throw "Missing CMake cache entry: $name"
+          }
+          if ((Get-CacheValue 'N64FORGE_ENABLE_D3D12') -ne 'ON') {
+            throw 'D3D12 backend was not enabled'
+          }
+          if ((Get-CacheValue 'N64FORGE_ENABLE_WIN32_VULKAN') -ne 'ON') {
+            throw 'Win32 Vulkan backend was not enabled'
+          }
+          $vulkanInclude = Get-CacheValue 'N64FORGE_WIN32_VULKAN_INCLUDE_DIR'
+          if (-not (Test-Path (Join-Path $vulkanInclude 'vulkan/vulkan.h'))) {
+            throw "Vulkan headers are missing from $vulkanInclude"
+          }
+          if (-not (Select-String -Path build/windows/CMakeCache.txt -Pattern 'CMAKE_GENERATOR_PLATFORM.*x64')) {
+            throw 'Windows preset did not select the x64 toolset'
+          }
+          $commands = Get-Content build/windows/compile_commands.json -Raw
+          foreach ($source in @('d3d12_viewport.cpp', 'win32_vulkan_viewport.cpp', 'jit_x64.cpp')) {
+            if (-not $commands.Contains($source)) { throw "Compile commands omit $source" }
+          }
+
+      - name: Build
+        run: cmake --build --preset windows-debug
+
+      # n64forge_tests asserts that the Windows x64 native JIT is available and
+      # runs the same parity suite used for the ARM64 backend.
+      - name: Test
+        run: ctest --preset windows-tests
